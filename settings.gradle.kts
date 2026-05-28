@@ -1,6 +1,14 @@
 @file:Suppress("UnstableApiUsage")
 
 pluginManagement {
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id == "com.aliucord.plugin") {
+                useModule("com.aliucord:gradle:${requested.version}")
+            }
+        }
+    }
+
     repositories {
         google()
         gradlePluginPortal()
