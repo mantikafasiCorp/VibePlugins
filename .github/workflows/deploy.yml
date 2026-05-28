@@ -9,6 +9,8 @@ on:
   push:
     branches:
       - main
+      - master
+      - codex/aliuplugin-*
 
 permissions:
   contents: write
