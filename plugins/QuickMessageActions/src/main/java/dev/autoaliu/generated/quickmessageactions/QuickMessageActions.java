@@ -1,4 +1,4 @@
-package dev.autoaliu.generated.quickreact;
+package dev.autoaliu.generated.quickmessageactions;
 
 import android.content.Context;
 import android.graphics.drawable.GradientDrawable;
@@ -46,8 +46,8 @@ import rx.Subscription;
 
 @AliucordPlugin
 @SuppressWarnings({"unused", "unchecked"})
-public class MessageQuickActions extends Plugin {
-    private static final String SETTINGS_NAME = "MessageQuickActions";
+public class QuickMessageActions extends Plugin {
+    private static final String SETTINGS_NAME = "QuickMessageActions";
     private static final String KEY_ENABLED = "enabled";
     private static final int QUICK_BUTTON_COUNT = 3;
     private static final int CHAT_TEXT_ID = Utils.getResId("chat_list_adapter_item_text", "id");
@@ -62,7 +62,7 @@ public class MessageQuickActions extends Plugin {
     private PopupWindow currentPopup = null;
     private long popupMessageId = -1L;
 
-    public MessageQuickActions() {
+    public QuickMessageActions() {
         settingsTab = new SettingsTab(SettingsSheet.class, SettingsTab.Type.BOTTOM_SHEET);
     }
 
@@ -72,7 +72,7 @@ public class MessageQuickActions extends Plugin {
             WidgetChatListAdapterItemMessage.class,
             "onConfigure",
             new Class<?>[] { int.class, ChatListEntry.class },
-            new Hook(param -> configureQuickReactions(
+            new Hook(param -> configureQuickMessageActions(
                 (WidgetChatListAdapterItemMessage) param.thisObject,
                 (ChatListEntry) param.args[1]
             ))
@@ -96,7 +96,7 @@ public class MessageQuickActions extends Plugin {
         }
     }
 
-    private void configureQuickReactions(WidgetChatListAdapterItemMessage row, ChatListEntry entry) {
+    private void configureQuickMessageActions(WidgetChatListAdapterItemMessage row, ChatListEntry entry) {
         if (row == null || row.itemView == null) return;
 
         if (!settings.getBool(KEY_ENABLED, true) || !(entry instanceof MessageEntry)) {
@@ -116,12 +116,12 @@ public class MessageQuickActions extends Plugin {
     private void applyClickListener(View itemView, Message message, WidgetChatListAdapter adapter) {
         View.OnClickListener oldListener = getOnClickListener(itemView);
         
-        if (oldListener instanceof QuickReactClickListener) {
-            QuickReactClickListener qrListener = (QuickReactClickListener) oldListener;
+        if (oldListener instanceof QuickMessageActionsClickListener) {
+            QuickMessageActionsClickListener qrListener = (QuickMessageActionsClickListener) oldListener;
             qrListener.message = message;
             qrListener.adapter = adapter;
         } else {
-            itemView.setOnClickListener(new QuickReactClickListener(oldListener, message, adapter));
+            itemView.setOnClickListener(new QuickMessageActionsClickListener(oldListener, message, adapter));
         }
     }
 
@@ -139,14 +139,14 @@ public class MessageQuickActions extends Plugin {
         return null;
     }
 
-    private class QuickReactClickListener implements View.OnClickListener {
+    private class QuickMessageActionsClickListener implements View.OnClickListener {
         public final View.OnClickListener original;
         public Message message;
         public WidgetChatListAdapter adapter;
         private int clicks = 0;
         private Runnable pendingRunnable = null;
 
-        public QuickReactClickListener(View.OnClickListener original, Message message, WidgetChatListAdapter adapter) {
+        public QuickMessageActionsClickListener(View.OnClickListener original, Message message, WidgetChatListAdapter adapter) {
             this.original = original;
             this.message = message;
             this.adapter = adapter;
@@ -360,10 +360,10 @@ public class MessageQuickActions extends Plugin {
                             showPopup(anchor);
                         }
                     });
-                }, throwable -> logger.error("MessageQuickActions failed to read frequent emojis", throwable));
+                }, throwable -> logger.error("QuickMessageActions failed to read frequent emojis", throwable));
             subscriptions.add(subscription);
         } catch (Throwable throwable) {
-            logger.error("MessageQuickActions failed to request frequent emojis", throwable);
+            logger.error("QuickMessageActions failed to request frequent emojis", throwable);
         }
     }
 
@@ -374,7 +374,7 @@ public class MessageQuickActions extends Plugin {
         try {
             currentPopup.showAsDropDown(popupAnchor, DimenUtils.dpToPx(16), DimenUtils.dpToPx(4));
         } catch (Exception e) {
-            logger.error("Failed to show MessageQuickActions popup", e);
+            logger.error("Failed to show QuickMessageActions popup", e);
         }
     }
 
@@ -500,7 +500,7 @@ public class MessageQuickActions extends Plugin {
             CheckedSetting enabled = Utils.createCheckedSetting(
                 requireContext(),
                 CheckedSetting.ViewType.SWITCH,
-                "Enable quick react buttons",
+                "Enable quick message actions",
                 "Show your top three frequently used emoji beside messages."
             );
             enabled.setChecked(api.getBool(KEY_ENABLED, true));
