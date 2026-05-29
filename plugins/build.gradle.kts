@@ -17,8 +17,7 @@ subprojects {
     }
 
     configure<LibraryExtension> {
-        // TODO: Change to your package name
-        namespace = "com.github.yournamehere"
+        namespace = "dev.mantikafasi.aliucordplugins"
         compileSdk = 36
 
         defaultConfig {
@@ -37,11 +36,9 @@ subprojects {
     }
 
     configure<AliucordExtension> {
-        // TODO: Change to your name and user ID
-        author("yournamehere", 0L, hyperlink = true)
+        author("mantikafasi", 287555395151593473L, hyperlink = true)
 
-        // TODO: Change to your repository
-        github("https://github.com/Aliucord/plugins-template")
+        github("https://github.com/mantikafasiCorp/VibePlugins")
     }
 
     configure<KtlintExtension> {

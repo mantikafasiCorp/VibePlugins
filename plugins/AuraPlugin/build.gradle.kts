@@ -2,7 +2,7 @@ version = "1.0.0"
 description = "automake it"
 
 android {
-    namespace = "dev.autoaliu.generated.auraplugin"
+    namespace = "dev.mantikafasi.aliucordplugins"
 }
 
 aliucord {

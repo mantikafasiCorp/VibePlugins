@@ -1,5 +1,5 @@
 version = "1.0.0"
-description = "Smoke test plugin for the Dockerized Aliucord builder"
+description = "Adds a Ban button below every message to Ban the user."
 
 android {
     namespace = "dev.mantikafasi.aliucordplugins"

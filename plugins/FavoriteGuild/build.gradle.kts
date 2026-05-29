@@ -2,5 +2,5 @@ version = "1.0.0"
 description = "FavoriteGuild Plugin"
 
 android {
-    namespace = "dev.autoaliu.generated.favoriteguild"
+    namespace = "dev.mantikafasi.aliucordplugins"
 }
