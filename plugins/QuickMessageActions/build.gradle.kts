@@ -1,4 +1,4 @@
-version = "1.0.4"
+version = "1.0.5"
 description = "put quick message action buttons next to messages"
 
 android {
@@ -8,6 +8,9 @@ android {
 aliucord {
     changelog.set(
         """
+        # 1.0.5
+        * Fixed quick delete by using Discord's message store delete path instead of invoking an unattached actions sheet.
+
         # 1.0.4
         * Replaced the actions-only setting with separate quick reactions and message actions toggles.
         * Quick reactions and message actions are both enabled by default.

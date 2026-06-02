@@ -374,34 +374,9 @@ public class QuickMessageActions extends Plugin {
 
     private void onDelete(Message message) {
         try {
-            WidgetChatListActions actions = new WidgetChatListActions();
-            for (java.lang.reflect.Method m : WidgetChatListActions.class.getDeclaredMethods()) {
-                if (m.getName().toLowerCase().contains("delete")) {
-                    m.setAccessible(true);
-                    Class<?>[] types = m.getParameterTypes();
-                    if (types.length == 1 && types[0] == Message.class) {
-                        m.invoke(actions, message);
-                        return;
-                    } else if (types.length == 2 && types[0] == WidgetChatListActions.class && types[1] == Message.class) {
-                        m.invoke(null, actions, message);
-                        return;
-                    }
-                }
-            }
+            StoreStream.getMessages().deleteMessage(message);
         } catch (Throwable e) {
             logger.error("Failed to delete", e);
-            try {
-                Object api = com.discord.utilities.rest.RestAPI.getApi();
-                Object observable = api.getClass().getMethod("deleteMessage", long.class, long.class).invoke(api, message.getChannelId(), message.getId());
-                if (observable != null) {
-                    for (java.lang.reflect.Method sm : observable.getClass().getMethods()) {
-                        if (sm.getName().equals("subscribe") && sm.getParameterTypes().length == 0) {
-                            sm.invoke(observable);
-                            break;
-                        }
-                    }
-                }
-            } catch (Throwable ignored) {}
         }
     }
 
