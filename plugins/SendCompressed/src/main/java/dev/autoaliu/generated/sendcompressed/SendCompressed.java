@@ -27,6 +27,7 @@ import com.aliucord.patcher.InsteadHook;
 import com.aliucord.utils.DimenUtils;
 import com.aliucord.widgets.BottomSheet;
 import com.discord.utilities.attachments.AttachmentUtilsKt;
+import com.discord.utilities.color.ColorCompat;
 import com.discord.widgets.chat.MessageContent;
 import com.discord.widgets.chat.MessageManager;
 import com.discord.widgets.chat.input.ChatInputViewModel;
@@ -67,14 +68,17 @@ public final class SendCompressed extends Plugin {
     private static final String KEY_IMAGES = "images";
     private static final String KEY_VIDEOS = "videos";
     private static final String KEY_AGGRESSIVE = "aggressive";
+    private static final String KEY_SKIP_SMALL = "skipSmall";
     private static final String KEY_QUALITY = "quality";
     private static final String KEY_TARGET_MB = "targetMb";
     private static final long DEFAULT_TARGET_BYTES = 10L * 1024L * 1024L;
+    private static final long SMALL_FILE_BYTES = 10L * 1024L * 1024L;
     private static final int EGL_OPENGL_ES3_BIT_KHR = 0x00000040;
     private static final int EGL_RECORDABLE_ANDROID = 0x00003142;
     private static final int MAX_WAIT_MINUTES = 8;
     private static final String NOTIFICATION_CHANNEL_ID = "sendcompressed_progress";
     private static final int NOTIFICATION_ID = 0x53434d50;
+    private static final int COLOR_HEADER_SECONDARY_ATTR = Utils.getResId("colorHeaderSecondary", "attr");
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private volatile boolean stopped;
@@ -221,6 +225,7 @@ public final class SendCompressed extends Plugin {
     private boolean hasCompressibleAttachment(Context context, List<? extends Attachment<?>> attachments) {
         ContentResolver resolver = context.getContentResolver();
         for (Attachment<?> attachment : attachments) {
+            if (shouldSkipSmallFile(context, attachment)) continue;
             if (settings.getBool(KEY_IMAGES, true) && isCompressibleImage(attachment, resolver)) return true;
             if (settings.getBool(KEY_VIDEOS, true) && AttachmentUtilsKt.isVideo(attachment, resolver)) return true;
         }
@@ -274,14 +279,19 @@ public final class SendCompressed extends Plugin {
     }
 
     private void releaseInputUi(Function1<Boolean, Unit> callback) {
-        mainHandler.post(() -> {
+        Runnable release = () -> {
             dismissActiveAttachmentSheet();
             try {
                 callback.invoke(Boolean.TRUE);
             } catch (Throwable throwable) {
                 logger.error("Failed to release input UI before compression", throwable);
             }
-        });
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            release.run();
+        } else {
+            mainHandler.post(release);
+        }
     }
 
     private void dismissActiveAttachmentSheet() {
@@ -306,7 +316,9 @@ public final class SendCompressed extends Plugin {
             index++;
             Attachment<?> replacement = attachment;
             try {
-                if (settings.getBool(KEY_IMAGES, true) && isCompressibleImage(attachment, resolver)) {
+                if (shouldSkipSmallFile(context, attachment)) {
+                    progress.skipped(index, "under 10 MB");
+                } else if (settings.getBool(KEY_IMAGES, true) && isCompressibleImage(attachment, resolver)) {
                     progress.startAttachment(index, "image");
                     replacement = compressImage(context, attachment, targetBytes);
                 } else if (settings.getBool(KEY_VIDEOS, true) && AttachmentUtilsKt.isVideo(attachment, resolver)) {
@@ -319,6 +331,12 @@ public final class SendCompressed extends Plugin {
             out.add((Attachment<?>) replacement);
         }
         return out;
+    }
+
+    private boolean shouldSkipSmallFile(Context context, Attachment<?> attachment) {
+        if (!settings.getBool(KEY_SKIP_SMALL, true)) return false;
+        long size = originalSize(context, attachment);
+        return size > 0L && size < SMALL_FILE_BYTES;
     }
 
     private boolean isCompressibleImage(Attachment<?> attachment, ContentResolver resolver) {
@@ -448,6 +466,11 @@ public final class SendCompressed extends Plugin {
             notify("Compressing " + type + " " + index + "/" + total, "Preparing attachment...", 0, 0, true, false);
         }
 
+        synchronized void skipped(int index, String reason) {
+            this.index = index;
+            notify("Skipping attachment " + index + "/" + total, reason, 0, 0, false, false);
+        }
+
         synchronized void videoProgress(double progress) {
             int percent = Math.max(0, Math.min(99, (int) Math.round(progress * 100d)));
             long now = System.currentTimeMillis();
@@ -471,22 +494,20 @@ public final class SendCompressed extends Plugin {
         }
 
         private void notify(String title, String text, int max, int progress, boolean indeterminate, boolean autoCancel) {
-            mainHandler.post(() -> {
-                if (stopped || notificationManager == null) return;
-                Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                    ? new Notification.Builder(context, NOTIFICATION_CHANNEL_ID)
-                    : new Notification.Builder(context);
-                builder
-                    .setSmallIcon(android.R.drawable.stat_sys_upload)
-                    .setContentTitle(title)
-                    .setContentText(text)
-                    .setOngoing(!autoCancel)
-                    .setAutoCancel(autoCancel)
-                    .setOnlyAlertOnce(true)
-                    .setShowWhen(false)
-                    .setProgress(max, progress, indeterminate);
-                notificationManager.notify(NOTIFICATION_ID, builder.build());
-            });
+            if (stopped || notificationManager == null) return;
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(context, NOTIFICATION_CHANNEL_ID)
+                : new Notification.Builder(context);
+            builder
+                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setOngoing(!autoCancel)
+                .setAutoCancel(autoCancel)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setProgress(max, progress, indeterminate);
+            notificationManager.notify(NOTIFICATION_ID, builder.build());
         }
 
         static void cancel(Context context) {
@@ -509,11 +530,11 @@ public final class SendCompressed extends Plugin {
 
     private VideoPreset videoPreset(Context context, Attachment<?> attachment, long originalSize, long targetBytes) {
         int quality = settings.getInt(KEY_QUALITY, 1);
-        int maxMajor = quality == 2 ? 1280 : quality == 1 ? 960 : 720;
-        int maxMinor = quality == 2 ? 720 : quality == 1 ? 540 : 480;
-        int frameRate = quality == 2 ? 30 : 24;
-        int audioBitrate = quality == 2 ? 128_000 : 96_000;
-        int videoBitrate = quality == 2 ? 2_400_000 : quality == 1 ? 1_200_000 : 700_000;
+        int maxMajor = quality >= 4 ? 2560 : quality == 3 ? 1920 : quality == 2 ? 1280 : quality == 1 ? 960 : 720;
+        int maxMinor = quality >= 4 ? 1440 : quality == 3 ? 1080 : quality == 2 ? 720 : quality == 1 ? 540 : 480;
+        int frameRate = quality >= 3 ? 30 : quality == 2 ? 30 : 24;
+        int audioBitrate = quality >= 4 ? 192_000 : quality == 3 ? 160_000 : quality == 2 ? 128_000 : 96_000;
+        int videoBitrate = quality >= 4 ? 8_000_000 : quality == 3 ? 4_800_000 : quality == 2 ? 2_400_000 : quality == 1 ? 1_200_000 : 700_000;
 
         if (settings.getBool(KEY_AGGRESSIVE, true) && originalSize > targetBytes) {
             long durationMs = videoDurationMs(context, attachment.getUri());
@@ -571,12 +592,12 @@ public final class SendCompressed extends Plugin {
 
     private int imageQuality() {
         int quality = settings.getInt(KEY_QUALITY, 1);
-        return quality == 2 ? 86 : quality == 1 ? 74 : 58;
+        return quality >= 4 ? 94 : quality == 3 ? 90 : quality == 2 ? 86 : quality == 1 ? 74 : 58;
     }
 
     private int maxImageDimension() {
         int quality = settings.getInt(KEY_QUALITY, 1);
-        return quality == 2 ? 2560 : quality == 1 ? 1920 : 1280;
+        return quality >= 4 ? 4096 : quality == 3 ? 3072 : quality == 2 ? 2560 : quality == 1 ? 1920 : 1280;
     }
 
     private static int sampleSize(int width, int height, int maxDim) {
@@ -675,9 +696,12 @@ public final class SendCompressed extends Plugin {
             addSwitch(api, KEY_ENABLED, true, "Enable compression", "Compress supported attachments before sending.");
             addSwitch(api, KEY_IMAGES, true, "Compress images", "JPEG, PNG, and WebP images are re-encoded.");
             addSwitch(api, KEY_VIDEOS, true, "Compress videos", "Videos are transcoded to smaller MP4 files.");
+            addSwitch(api, KEY_SKIP_SMALL, true, "Skip files under 10 MB", "Send smaller attachments without recompressing them.");
             addSwitch(api, KEY_AGGRESSIVE, true, "Aggressive 10 MB fit", "Lower quality further when an attachment is over the target size.");
 
             addView(header("Quality"));
+            addQuality(api, 4, "Maximum", "Highest detail, least compression.");
+            addQuality(api, 3, "Very High", "Higher quality with larger compressed files.");
             addQuality(api, 2, "High", "Larger files with better detail.");
             addQuality(api, 1, "Balanced", "Default size and quality.");
             addQuality(api, 0, "Small", "Prioritize smaller uploads.");
@@ -722,6 +746,7 @@ public final class SendCompressed extends Plugin {
         private TextView header(String text) {
             TextView header = new TextView(requireContext());
             header.setText(text.toUpperCase(Locale.ROOT));
+            header.setTextColor(ColorCompat.getThemedColor(requireContext(), COLOR_HEADER_SECONDARY_ATTR));
             header.setTextSize(12f);
             header.setPadding(DimenUtils.dpToPx(16), DimenUtils.dpToPx(16), DimenUtils.dpToPx(16), DimenUtils.dpToPx(6));
             return header;

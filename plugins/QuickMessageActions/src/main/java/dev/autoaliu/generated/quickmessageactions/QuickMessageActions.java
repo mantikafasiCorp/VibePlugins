@@ -54,13 +54,14 @@ public class QuickMessageActions extends Plugin {
     private static final int COUNTER_TEXT_SWITCHER_ID = Utils.getResId("counter_text_switcher", "id");
     private static final int EMOJI_TEXT_VIEW_ID = Utils.getResId("emoji_text_view", "id");
     private static final int COLOR_BACKGROUND_TERTIARY_ATTR = Utils.getResId("colorBackgroundTertiary", "attr");
+    private static final SettingsAPI PLUGIN_SETTINGS = new SettingsAPI(SETTINGS_NAME);
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Map<String, List<Emoji>> emojiCache = new ConcurrentHashMap<>();
     private final List<Subscription> subscriptions = Collections.synchronizedList(new ArrayList<>());
     
-    private PopupWindow currentPopup = null;
-    private long popupMessageId = -1L;
+    private static PopupWindow currentPopup = null;
+    private static long popupMessageId = -1L;
 
     public QuickMessageActions() {
         settingsTab = new SettingsTab(SettingsSheet.class, SettingsTab.Type.BOTTOM_SHEET);
@@ -99,18 +100,24 @@ public class QuickMessageActions extends Plugin {
     private void configureQuickMessageActions(WidgetChatListAdapterItemMessage row, ChatListEntry entry) {
         if (row == null || row.itemView == null) return;
 
-        if (!settings.getBool(KEY_ENABLED, true) || !(entry instanceof MessageEntry)) {
+        if (!(entry instanceof MessageEntry)) {
+            restoreOriginalClickListener(row.itemView);
             return;
         }
 
         MessageEntry messageEntry = (MessageEntry) entry;
         Message message = messageEntry.getMessage();
         if (!canShowFor(message, messageEntry)) {
+            restoreOriginalClickListener(row.itemView);
             return;
         }
 
         WidgetChatListAdapter adapter = WidgetChatListAdapterItemMessage.access$getAdapter$p(row);
         applyClickListener(row.itemView, message, adapter);
+    }
+
+    private static boolean showMessageActions() {
+        return PLUGIN_SETTINGS.getBool(KEY_ENABLED, true);
     }
 
     private void applyClickListener(View itemView, Message message, WidgetChatListAdapter adapter) {
@@ -121,7 +128,16 @@ public class QuickMessageActions extends Plugin {
             qrListener.message = message;
             qrListener.adapter = adapter;
         } else {
-            itemView.setOnClickListener(new QuickMessageActionsClickListener(oldListener, message, adapter));
+            itemView.setOnClickListener(new QuickMessageActionsClickListener(unwrapQuickMessageActionsListener(oldListener), message, adapter));
+        }
+    }
+
+    private static void restoreOriginalClickListener(View itemView) {
+        View.OnClickListener oldListener = getOnClickListener(itemView);
+        if (oldListener instanceof QuickMessageActionsClickListener) {
+            itemView.setOnClickListener(((QuickMessageActionsClickListener) oldListener).original);
+        } else if (isQuickMessageActionsListener(oldListener)) {
+            itemView.setOnClickListener(unwrapQuickMessageActionsListener(oldListener));
         }
     }
 
@@ -139,6 +155,31 @@ public class QuickMessageActions extends Plugin {
         return null;
     }
 
+    private static boolean isQuickMessageActionsListener(Object listener) {
+        return listener != null && listener.getClass().getName().endsWith("QuickMessageActions$QuickMessageActionsClickListener");
+    }
+
+    private static View.OnClickListener unwrapQuickMessageActionsListener(View.OnClickListener listener) {
+        if (!isQuickMessageActionsListener(listener)) return listener;
+
+        try {
+            java.lang.reflect.Field originalField = listener.getClass().getDeclaredField("original");
+            originalField.setAccessible(true);
+            Object original = originalField.get(listener);
+            return original instanceof View.OnClickListener ? (View.OnClickListener) original : null;
+        } catch (Throwable ignored) {
+            return listener;
+        }
+    }
+
+    private static void dismissCurrentPopup() {
+        if (currentPopup != null) {
+            currentPopup.dismiss();
+            currentPopup = null;
+            popupMessageId = -1L;
+        }
+    }
+
     private class QuickMessageActionsClickListener implements View.OnClickListener {
         public final View.OnClickListener original;
         public Message message;
@@ -154,6 +195,8 @@ public class QuickMessageActions extends Plugin {
 
         @Override
         public void onClick(View v) {
+            Message clickedMessage = message;
+            WidgetChatListAdapter clickedAdapter = adapter;
             clicks++;
             if (pendingRunnable != null) {
                 mainHandler.removeCallbacks(pendingRunnable);
@@ -164,7 +207,7 @@ public class QuickMessageActions extends Plugin {
             }
             pendingRunnable = () -> {
                 if (clicks == 1) {
-                    handleSingleTap(v, message, adapter);
+                    handleSingleTap(v, clickedMessage, clickedAdapter);
                 }
                 clicks = 0;
                 pendingRunnable = null;
@@ -204,10 +247,12 @@ public class QuickMessageActions extends Plugin {
         container.setPadding(DimenUtils.dpToPx(4), DimenUtils.dpToPx(4), DimenUtils.dpToPx(4), DimenUtils.dpToPx(4));
         container.setElevation(DimenUtils.dpToPx(8));
 
-        addQuickAction(container, message, "ic_reply_24dp", v -> onReply(message));
-        if (isMe(message)) {
-            addQuickAction(container, message, "ic_edit_24dp", v -> onEdit(message));
-            addQuickAction(container, message, "ic_delete_24dp", v -> onDelete(message));
+        if (showMessageActions()) {
+            addQuickAction(container, message, "ic_reply_24dp", v -> onReply(message));
+            if (isMe(message)) {
+                addQuickAction(container, message, "ic_edit_24dp", v -> onEdit(message));
+                addQuickAction(container, message, "ic_delete_24dp", v -> onDelete(message));
+            }
         }
 
         currentPopup = new PopupWindow(container, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -496,15 +541,17 @@ public class QuickMessageActions extends Plugin {
         public void onViewCreated(View view, Bundle bundle) {
             super.onViewCreated(view, bundle);
 
-            SettingsAPI api = new SettingsAPI(SETTINGS_NAME);
             CheckedSetting enabled = Utils.createCheckedSetting(
                 requireContext(),
                 CheckedSetting.ViewType.SWITCH,
-                "Enable quick message actions",
-                "Show your top three frequently used emoji beside messages."
+                "Show message actions",
+                "Show reply, edit, and delete actions beside quick reactions."
             );
-            enabled.setChecked(api.getBool(KEY_ENABLED, true));
-            enabled.setOnCheckedListener(checked -> api.setBool(KEY_ENABLED, checked));
+            enabled.setChecked(PLUGIN_SETTINGS.getBool(KEY_ENABLED, true));
+            enabled.setOnCheckedListener(checked -> {
+                PLUGIN_SETTINGS.setBool(KEY_ENABLED, checked);
+                if (!checked) dismissCurrentPopup();
+            });
             addView(enabled);
         }
     }
