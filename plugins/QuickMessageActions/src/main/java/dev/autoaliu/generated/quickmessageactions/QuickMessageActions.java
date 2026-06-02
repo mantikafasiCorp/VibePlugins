@@ -48,7 +48,10 @@ import rx.Subscription;
 @SuppressWarnings({"unused", "unchecked"})
 public class QuickMessageActions extends Plugin {
     private static final String SETTINGS_NAME = "QuickMessageActions";
-    private static final String KEY_ENABLED = "enabled";
+    private static final String KEY_QUICK_REACTIONS = "quickReactions";
+    private static final String KEY_MESSAGE_ACTIONS = "messageActions";
+    private static final String LEGACY_KEY_ENABLED = "enabled";
+    private static final String LEGACY_KEY_ACTIONS_ONLY = "actionsOnly";
     private static final int QUICK_BUTTON_COUNT = 3;
     private static final int CHAT_TEXT_ID = Utils.getResId("chat_list_adapter_item_text", "id");
     private static final int COUNTER_TEXT_SWITCHER_ID = Utils.getResId("counter_text_switcher", "id");
@@ -117,7 +120,11 @@ public class QuickMessageActions extends Plugin {
     }
 
     private static boolean showMessageActions() {
-        return PLUGIN_SETTINGS.getBool(KEY_ENABLED, true);
+        return PLUGIN_SETTINGS.getBool(KEY_MESSAGE_ACTIONS, PLUGIN_SETTINGS.getBool(LEGACY_KEY_ENABLED, true));
+    }
+
+    private static boolean showQuickReactions() {
+        return PLUGIN_SETTINGS.getBool(KEY_QUICK_REACTIONS, !PLUGIN_SETTINGS.getBool(LEGACY_KEY_ACTIONS_ONLY, false));
     }
 
     private void applyClickListener(View itemView, Message message, WidgetChatListAdapter adapter) {
@@ -247,7 +254,14 @@ public class QuickMessageActions extends Plugin {
         container.setPadding(DimenUtils.dpToPx(4), DimenUtils.dpToPx(4), DimenUtils.dpToPx(4), DimenUtils.dpToPx(4));
         container.setElevation(DimenUtils.dpToPx(8));
 
-        if (showMessageActions()) {
+        boolean includeMessageActions = showMessageActions();
+        boolean includeQuickReactions = showQuickReactions();
+
+        if (!includeMessageActions && !includeQuickReactions) {
+            return;
+        }
+
+        if (includeMessageActions) {
             addQuickAction(container, message, "ic_reply_24dp", v -> onReply(message));
             if (isMe(message)) {
                 addQuickAction(container, message, "ic_edit_24dp", v -> onEdit(message));
@@ -268,10 +282,15 @@ public class QuickMessageActions extends Plugin {
 
         popupMessageId = message.getId();
 
+        if (!includeQuickReactions) {
+            showPopupIfNotEmpty(anchor, container);
+            return;
+        }
+
         List<Emoji> cached = emojiCache.get(cacheKey(message.getChannelId()));
         if (cached != null) {
             populateButtons(container, adapter, message, cached);
-            showPopup(anchor);
+            showPopupIfNotEmpty(anchor, container);
             return;
         }
 
@@ -402,7 +421,7 @@ public class QuickMessageActions extends Plugin {
                     mainHandler.post(() -> {
                         if (currentPopup != null && currentPopup.getContentView() == container && popupMessageId == expectedMessageId) {
                             populateButtons(container, adapter, message, recent);
-                            showPopup(anchor);
+                            showPopupIfNotEmpty(anchor, container);
                         }
                     });
                 }, throwable -> logger.error("QuickMessageActions failed to read frequent emojis", throwable));
@@ -421,6 +440,14 @@ public class QuickMessageActions extends Plugin {
         } catch (Exception e) {
             logger.error("Failed to show QuickMessageActions popup", e);
         }
+    }
+
+    private void showPopupIfNotEmpty(View anchor, LinearLayout container) {
+        if (container.getChildCount() == 0) {
+            dismissCurrentPopup();
+            return;
+        }
+        showPopup(anchor);
     }
 
     private void populateButtons(LinearLayout container, WidgetChatListAdapter adapter, Message message, List<Emoji> emojis) {
@@ -541,18 +568,31 @@ public class QuickMessageActions extends Plugin {
         public void onViewCreated(View view, Bundle bundle) {
             super.onViewCreated(view, bundle);
 
-            CheckedSetting enabled = Utils.createCheckedSetting(
+            CheckedSetting quickReactions = Utils.createCheckedSetting(
+                requireContext(),
+                CheckedSetting.ViewType.SWITCH,
+                "Show quick reactions",
+                "Show recent emoji reaction buttons."
+            );
+            quickReactions.setChecked(showQuickReactions());
+            quickReactions.setOnCheckedListener(checked -> {
+                PLUGIN_SETTINGS.setBool(KEY_QUICK_REACTIONS, checked);
+                dismissCurrentPopup();
+            });
+            addView(quickReactions);
+
+            CheckedSetting messageActions = Utils.createCheckedSetting(
                 requireContext(),
                 CheckedSetting.ViewType.SWITCH,
                 "Show message actions",
-                "Show reply, edit, and delete actions beside quick reactions."
+                "Show reply, edit, and delete action buttons."
             );
-            enabled.setChecked(PLUGIN_SETTINGS.getBool(KEY_ENABLED, true));
-            enabled.setOnCheckedListener(checked -> {
-                PLUGIN_SETTINGS.setBool(KEY_ENABLED, checked);
-                if (!checked) dismissCurrentPopup();
+            messageActions.setChecked(showMessageActions());
+            messageActions.setOnCheckedListener(checked -> {
+                PLUGIN_SETTINGS.setBool(KEY_MESSAGE_ACTIONS, checked);
+                dismissCurrentPopup();
             });
-            addView(enabled);
+            addView(messageActions);
         }
     }
 }
