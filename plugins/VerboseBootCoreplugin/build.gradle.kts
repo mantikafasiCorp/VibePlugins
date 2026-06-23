@@ -9,7 +9,7 @@ tasks.named("extractPluginClass") {
     enabled = false
 }
 
-val writeCorePluginClass by tasks.registering {
+val writePluginClass by tasks.registering {
     val pluginClassNameFile = layout.buildDirectory.file("intermediates/pluginClass.txt")
 
     outputs.file(pluginClassNameFile)
@@ -22,5 +22,5 @@ val writeCorePluginClass by tasks.registering {
 }
 
 tasks.named("package") {
-    dependsOn(writeCorePluginClass)
+    dependsOn(writePluginClass)
 }

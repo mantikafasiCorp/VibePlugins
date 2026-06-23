@@ -3,6 +3,7 @@ package dev.autoaliu.generated.verbosebootcoreplugin;
 import android.content.Context;
 import android.app.Activity;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -44,15 +45,25 @@ public final class VerboseBootCoreplugin extends CorePlugin {
     private static final String KEY_COLORS = "colors";
     private static final String KEY_MAX_LINES = "maxLines";
     private static final String OVERLAY_TAG = "VerboseBootCoreplugin.Overlay";
+    private static final String LOG_TEXT_TAG = "VerboseBootCoreplugin.LogText";
     private static final int DEFAULT_MAX_LINES = 36;
     private static final long NO_LOGO_GRACE_MS = 350L;
     private static final long FALLBACK_REMOVE_DELAY_MS = 3000L;
     private static final Deque<LogLine> BOOT_LINES = new ArrayDeque<>();
     private static final long BOOT_STARTED_AT = System.currentTimeMillis();
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+    private static final Runnable REMOVE_EARLY_OVERLAY = VerboseBootCoreplugin::removeEarlyOverlay;
     private static XC_MethodHook.Unhook logUnpatch;
+    private static XC_MethodHook.Unhook transitionCreateUnpatch;
+    private static XC_MethodHook.Unhook transitionResumeUnpatch;
+    private static XC_MethodHook.Unhook appCreatePreUnpatch;
+    private static XC_MethodHook.Unhook appCreatePostUnpatch;
+    private static XC_MethodHook.Unhook appResumeUnpatch;
+    private static FrameLayout earlyOverlayRoot;
+    private static TextView earlyLogText;
     private static VerboseBootCoreplugin activeInstance;
 
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Handler mainHandler = MAIN_HANDLER;
     private final Runnable removeOverlayRunnable = this::removeOverlay;
     private final Deque<LogLine> lines = new ArrayDeque<>();
     private long startedAt;
@@ -65,7 +76,7 @@ public final class VerboseBootCoreplugin extends CorePlugin {
     private boolean capturing;
 
     static {
-        ensureLogPatch();
+        ensureStaticPatches();
     }
 
     public VerboseBootCoreplugin() {
@@ -76,7 +87,7 @@ public final class VerboseBootCoreplugin extends CorePlugin {
 
     @Override
     public void start(Context context) throws Throwable {
-        ensureLogPatch();
+        ensureStaticPatches();
         capturing = settings.getBool(KEY_ENABLED, true);
         if (!capturing) return;
 
@@ -91,54 +102,6 @@ public final class VerboseBootCoreplugin extends CorePlugin {
             attachOverlay(context);
             appendLine(4, "VerboseBootCoreplugin overlay attached", null);
         });
-
-        patcher.patch(
-            AppTransitionActivity.class,
-            "onResume",
-            new Class<?>[0],
-            new Hook(param -> {
-                if (!capturing) return;
-                Activity activity = (Activity) param.thisObject;
-                mainHandler.post(() -> {
-                    attachOverlay(activity);
-                    appendLine(3, "AppTransitionActivity.onResume visible", null);
-                });
-            })
-        );
-
-        patcher.patch(
-            AppActivity.class,
-            "onCreate",
-            new Class<?>[] { Bundle.class },
-            new PreHook(param -> {
-                AppActivity activity = (AppActivity) param.thisObject;
-                mainHandler.post(() -> {
-                    attachOverlay(activity);
-                    appendLine(3, "AppActivity.onCreate visible", null);
-                });
-            })
-        );
-
-        patcher.patch(
-            AppActivity.class,
-            "onCreate",
-            new Class<?>[] { Bundle.class },
-            new Hook(param -> {
-                AppActivity activity = (AppActivity) param.thisObject;
-                mainHandler.postDelayed(() -> attachOverlay(activity), 120L);
-            })
-        );
-
-        patcher.patch(
-            AppActivity.class,
-            "onResume",
-            new Class<?>[0],
-            new Hook(param -> {
-                if (!capturing) return;
-                AppActivity activity = (AppActivity) param.thisObject;
-                mainHandler.post(() -> attachOverlay(activity));
-            })
-        );
     }
 
     @Override
@@ -148,10 +111,7 @@ public final class VerboseBootCoreplugin extends CorePlugin {
         mainHandler.removeCallbacksAndMessages(null);
         runOnMainThread(this::removeOverlay);
         patcher.unpatchAll();
-        if (logUnpatch != null) {
-            logUnpatch.unhook();
-            logUnpatch = null;
-        }
+        unhookStaticPatches();
         commands.unregisterAll();
         lines.clear();
         synchronized (BOOT_LINES) {
@@ -167,10 +127,9 @@ public final class VerboseBootCoreplugin extends CorePlugin {
         }
     }
 
-    private static synchronized void ensureLogPatch() {
-        if (logUnpatch != null) return;
-
+    private static synchronized void ensureStaticPatches() {
         try {
+            if (logUnpatch == null) {
             logUnpatch = Patcher.addPatch(
                 AppLog.class,
                 "b",
@@ -187,8 +146,129 @@ public final class VerboseBootCoreplugin extends CorePlugin {
                     }
                 })
             );
+            }
         } catch (Throwable ignored) {
             logUnpatch = null;
+        }
+
+        try {
+            if (transitionCreateUnpatch == null) {
+                transitionCreateUnpatch = Patcher.addPatch(
+                    AppTransitionActivity.class,
+                    "onCreate",
+                    new Class<?>[] { Bundle.class },
+                    new PreHook(param -> handleActivityVisible((Activity) param.thisObject, "AppTransitionActivity.onCreate placeholder", 0L, true))
+                );
+            }
+        } catch (Throwable ignored) {
+            transitionCreateUnpatch = null;
+        }
+
+        try {
+            if (transitionResumeUnpatch == null) {
+                transitionResumeUnpatch = Patcher.addPatch(
+                    AppTransitionActivity.class,
+                    "onResume",
+                    new Class<?>[0],
+                    new Hook(param -> handleActivityVisible((Activity) param.thisObject, "AppTransitionActivity.onResume visible", 0L, false))
+                );
+            }
+        } catch (Throwable ignored) {
+            transitionResumeUnpatch = null;
+        }
+
+        try {
+            if (appCreatePreUnpatch == null) {
+                appCreatePreUnpatch = Patcher.addPatch(
+                    AppActivity.class,
+                    "onCreate",
+                    new Class<?>[] { Bundle.class },
+                    new PreHook(param -> handleActivityVisible((Activity) param.thisObject, "AppActivity.onCreate placeholder", 0L, true))
+                );
+            }
+        } catch (Throwable ignored) {
+            appCreatePreUnpatch = null;
+        }
+
+        try {
+            if (appCreatePostUnpatch == null) {
+                appCreatePostUnpatch = Patcher.addPatch(
+                    AppActivity.class,
+                    "onCreate",
+                    new Class<?>[] { Bundle.class },
+                    new Hook(param -> handleActivityVisible((Activity) param.thisObject, "AppActivity.onCreate rendered", 120L, false))
+                );
+            }
+        } catch (Throwable ignored) {
+            appCreatePostUnpatch = null;
+        }
+
+        try {
+            if (appResumeUnpatch == null) {
+                appResumeUnpatch = Patcher.addPatch(
+                    AppActivity.class,
+                    "onResume",
+                    new Class<?>[0],
+                    new Hook(param -> handleActivityVisible((Activity) param.thisObject, "AppActivity.onResume visible", 0L, false))
+                );
+            }
+        } catch (Throwable ignored) {
+            appResumeUnpatch = null;
+        }
+    }
+
+    private static synchronized void unhookStaticPatches() {
+        if (logUnpatch != null) logUnpatch.unhook();
+        if (transitionCreateUnpatch != null) transitionCreateUnpatch.unhook();
+        if (transitionResumeUnpatch != null) transitionResumeUnpatch.unhook();
+        if (appCreatePreUnpatch != null) appCreatePreUnpatch.unhook();
+        if (appCreatePostUnpatch != null) appCreatePostUnpatch.unhook();
+        if (appResumeUnpatch != null) appResumeUnpatch.unhook();
+        logUnpatch = null;
+        transitionCreateUnpatch = null;
+        transitionResumeUnpatch = null;
+        appCreatePreUnpatch = null;
+        appCreatePostUnpatch = null;
+        appResumeUnpatch = null;
+        removeEarlyOverlay();
+    }
+
+    private static void handleActivityVisible(Activity activity, String message, long delayMs, boolean installPlaceholder) {
+        if (!isEnabled()) return;
+
+        appendBootLine(3, message, null);
+        Runnable renderOverlay = () -> {
+            VerboseBootCoreplugin instance = activeInstance;
+            if (instance != null) {
+                if (!instance.capturing) return;
+                if (installPlaceholder) {
+                    instance.installPlaceholderFrame(activity);
+                } else {
+                    instance.attachOverlay(activity);
+                }
+                instance.appendLine(3, message, null);
+            } else {
+                if (installPlaceholder) {
+                    installEarlyPlaceholderFrame(activity);
+                } else {
+                    attachEarlyOverlay(activity);
+                }
+                renderEarlyLines();
+            }
+        };
+
+        if (delayMs == 0L && Looper.myLooper() == Looper.getMainLooper()) {
+            renderOverlay.run();
+        } else {
+            MAIN_HANDLER.postDelayed(renderOverlay, delayMs);
+        }
+    }
+
+    private static boolean isEnabled() {
+        try {
+            return new SettingsAPI(SETTINGS_NAME).getBool(KEY_ENABLED, true);
+        } catch (Throwable ignored) {
+            return true;
         }
     }
 
@@ -204,6 +284,7 @@ public final class VerboseBootCoreplugin extends CorePlugin {
             BOOT_LINES.addLast(new LogLine(priority, elapsedPrefix(BOOT_STARTED_AT, priority) + text));
             while (BOOT_LINES.size() > DEFAULT_MAX_LINES) BOOT_LINES.removeFirst();
         }
+        MAIN_HANDLER.post(VerboseBootCoreplugin::renderEarlyLines);
     }
 
     private void appendLine(int priority, String message, Throwable throwable) {
@@ -262,16 +343,106 @@ public final class VerboseBootCoreplugin extends CorePlugin {
         View existing = content.findViewWithTag(OVERLAY_TAG);
         if (existing instanceof FrameLayout) {
             overlayRoot = (FrameLayout) existing;
+            View existingLog = overlayRoot.findViewWithTag(LOG_TEXT_TAG);
+            if (existingLog instanceof TextView) logText = (TextView) existingLog;
+            earlyOverlayRoot = null;
+            earlyLogText = null;
             overlayRoot.bringToFront();
             renderLines();
             watchSplashLifetime(activity);
             return;
         }
 
+        FrameLayout root = createOverlay(activity);
+        logText = root.findViewWithTag(LOG_TEXT_TAG);
+        content.addView(root, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        overlayRoot = root;
+        overlayRoot.bringToFront();
+        renderLines();
+        watchSplashLifetime(activity);
+    }
+
+    private void installPlaceholderFrame(Activity activity) {
+        if (!capturing || activity == null) return;
+        installEarlyPlaceholderFrame(activity);
+        overlayRoot = earlyOverlayRoot;
+        logText = earlyLogText;
+        renderLines();
+        watchSplashLifetime(activity);
+    }
+
+    private static void attachEarlyOverlay(Activity activity) {
+        if (activity == null || activeInstance != null) return;
+
+        restoreSystemBars(activity);
+        activity.getWindow().setBackgroundDrawable(new ColorDrawable(0xff0f1117));
+        View decorView = activity.getWindow().getDecorView();
+        if (!(decorView instanceof ViewGroup)) return;
+        ViewGroup content = (ViewGroup) decorView;
+
+        View existing = content.findViewWithTag(OVERLAY_TAG);
+        if (existing instanceof FrameLayout) {
+            earlyOverlayRoot = (FrameLayout) existing;
+            View existingLog = earlyOverlayRoot.findViewWithTag(LOG_TEXT_TAG);
+            if (existingLog instanceof TextView) earlyLogText = (TextView) existingLog;
+            earlyOverlayRoot.bringToFront();
+            return;
+        }
+
+        earlyOverlayRoot = createOverlay(activity);
+        earlyLogText = earlyOverlayRoot.findViewWithTag(LOG_TEXT_TAG);
+        content.addView(earlyOverlayRoot, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        earlyOverlayRoot.bringToFront();
+        MAIN_HANDLER.postDelayed(REMOVE_EARLY_OVERLAY, FALLBACK_REMOVE_DELAY_MS);
+    }
+
+    private static void installEarlyPlaceholderFrame(Activity activity) {
+        if (activity == null) return;
+
+        restoreSystemBars(activity);
+        activity.getWindow().setBackgroundDrawable(new ColorDrawable(0xff0f1117));
+
+        View decorView = activity.getWindow().getDecorView();
+        if (decorView instanceof ViewGroup) {
+            View existing = ((ViewGroup) decorView).findViewWithTag(OVERLAY_TAG);
+            if (existing instanceof FrameLayout) {
+                earlyOverlayRoot = (FrameLayout) existing;
+                View existingLog = earlyOverlayRoot.findViewWithTag(LOG_TEXT_TAG);
+                if (existingLog instanceof TextView) earlyLogText = (TextView) existingLog;
+                earlyOverlayRoot.bringToFront();
+                return;
+            }
+        }
+
+        earlyOverlayRoot = createOverlay(activity);
+        earlyLogText = earlyOverlayRoot.findViewWithTag(LOG_TEXT_TAG);
+        activity.setContentView(earlyOverlayRoot, new ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        earlyOverlayRoot.bringToFront();
+        MAIN_HANDLER.postDelayed(REMOVE_EARLY_OVERLAY, FALLBACK_REMOVE_DELAY_MS);
+    }
+
+    private static void restoreSystemBars(Activity activity) {
+        View decor = activity.getWindow().getDecorView();
+        if (decor != null) decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+        activity.getWindow().setStatusBarColor(0xff0f1117);
+        activity.getWindow().setNavigationBarColor(0xff0f1117);
+    }
+
+    private static FrameLayout createOverlay(Activity activity) {
         FrameLayout root = new FrameLayout(activity);
         root.setTag(OVERLAY_TAG);
         root.setClickable(false);
-        root.setFitsSystemWindows(false);
+        root.setFitsSystemWindows(true);
+        root.setBackgroundColor(0xff0f1117);
         root.setElevation(DimenUtils.dpToPx(32));
 
         LinearLayout panel = new LinearLayout(activity);
@@ -286,18 +457,19 @@ public final class VerboseBootCoreplugin extends CorePlugin {
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextSize(16f);
 
-        logText = new TextView(activity);
-        logText.setTextColor(0xffd7dce2);
-        logText.setTypeface(Typeface.MONOSPACE);
-        logText.setTextSize(11f);
-        logText.setIncludeFontPadding(false);
-        logText.setGravity(Gravity.BOTTOM | Gravity.START);
+        TextView log = new TextView(activity);
+        log.setTag(LOG_TEXT_TAG);
+        log.setTextColor(0xffd7dce2);
+        log.setTypeface(Typeface.MONOSPACE);
+        log.setTextSize(11f);
+        log.setIncludeFontPadding(false);
+        log.setGravity(Gravity.BOTTOM | Gravity.START);
 
         panel.addView(title, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ));
-        panel.addView(logText, new LinearLayout.LayoutParams(
+        panel.addView(log, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             0,
             1f
@@ -307,14 +479,36 @@ public final class VerboseBootCoreplugin extends CorePlugin {
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
 
-        content.addView(root, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        ));
-        overlayRoot = root;
-        overlayRoot.bringToFront();
-        renderLines();
-        watchSplashLifetime(activity);
+        return root;
+    }
+
+    private static void renderEarlyLines() {
+        if (earlyLogText == null) return;
+
+        SpannableStringBuilder builder = new SpannableStringBuilder();
+        synchronized (BOOT_LINES) {
+            for (LogLine line : BOOT_LINES) {
+                int start = builder.length();
+                builder.append(line.text).append('\n');
+                builder.setSpan(
+                    new ForegroundColorSpan(colorForPriority(line.priority)),
+                    start,
+                    builder.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                );
+            }
+        }
+        earlyLogText.setText(builder);
+    }
+
+    private static void removeEarlyOverlay() {
+        MAIN_HANDLER.removeCallbacks(REMOVE_EARLY_OVERLAY);
+        if (earlyOverlayRoot == null) return;
+
+        ViewGroup parent = (ViewGroup) earlyOverlayRoot.getParent();
+        if (parent != null) parent.removeView(earlyOverlayRoot);
+        earlyOverlayRoot = null;
+        earlyLogText = null;
     }
 
     private void watchSplashLifetime(Activity activity) {

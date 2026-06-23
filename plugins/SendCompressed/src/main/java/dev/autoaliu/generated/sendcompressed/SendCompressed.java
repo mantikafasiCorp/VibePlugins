@@ -2,6 +2,10 @@ package dev.autoaliu.generated.sendcompressed;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.app.PendingIntent;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -59,6 +63,7 @@ import java.util.concurrent.TimeoutException;
 import kotlin.Unit;
 import kotlin.jvm.functions.Function0;
 import kotlin.jvm.functions.Function1;
+import kotlin.jvm.functions.Function2;
 
 @AliucordPlugin
 @SuppressWarnings({"unused", "unchecked", "rawtypes"})
@@ -78,10 +83,12 @@ public final class SendCompressed extends Plugin {
     private static final int MAX_WAIT_MINUTES = 8;
     private static final String NOTIFICATION_CHANNEL_ID = "sendcompressed_progress";
     private static final int NOTIFICATION_ID = 0x53434d50;
+    private static final String ACTION_CANCEL = "dev.autoaliu.generated.sendcompressed.CANCEL";
     private static final int COLOR_HEADER_SECONDARY_ATTR = Utils.getResId("colorHeaderSecondary", "attr");
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private volatile boolean stopped;
+    private volatile boolean cancelRequested;
     private Method sendMessageMethod;
     private ExecutorService compressionExecutor;
     private HandlerThread transcoderCallbackThread;
@@ -89,6 +96,7 @@ public final class SendCompressed extends Plugin {
     private volatile Future<?> activeCompressionTask;
     private volatile Future<Void> activeTranscodeTask;
     private volatile WeakReference<AttachmentBottomSheet> activeAttachmentSheet = new WeakReference<>(null);
+    private BroadcastReceiver cancelReceiver;
 
     public SendCompressed() {
         settingsTab = new SettingsTab(SettingsSheet.class, SettingsTab.Type.BOTTOM_SHEET);
@@ -109,6 +117,7 @@ public final class SendCompressed extends Plugin {
         transcoderCallbackThread.start();
         transcoderCallbackHandler = new Handler(transcoderCallbackThread.getLooper());
 
+        registerCancelReceiver(context);
         patchTranscoderEglConfigChooser();
         patchAttachmentBottomSheetShow();
         sendMessageMethod = ChatInputViewModel.class.getDeclaredMethod(
@@ -135,6 +144,8 @@ public final class SendCompressed extends Plugin {
 
             ChatInputViewModel viewModel = (ChatInputViewModel) param.thisObject;
             Object[] args = param.args.clone();
+            cancelRequested = false;
+            SendDestination destination = captureDestination(viewModel);
             Function1<Boolean, Unit> callback = (Function1<Boolean, Unit>) args[5];
             args[5] = (Function1<Boolean, Unit>) success -> {
                 if (!Boolean.TRUE.equals(success)) return callback.invoke(Boolean.FALSE);
@@ -144,7 +155,7 @@ public final class SendCompressed extends Plugin {
             if (executor == null || executor.isShutdown()) {
                 return invokeOriginal((Method) param.method, param.thisObject, param.args);
             }
-            activeCompressionTask = executor.submit(() -> compressAndReplay(viewModel, args));
+            activeCompressionTask = executor.submit(() -> compressAndReplay(viewModel, args, destination));
             releaseInputUi(callback);
             return null;
         }));
@@ -202,6 +213,7 @@ public final class SendCompressed extends Plugin {
     @Override
     public void stop(Context context) {
         stopped = true;
+        cancelRequested = true;
         Future<Void> transcodeTask = activeTranscodeTask;
         if (transcodeTask != null) transcodeTask.cancel(true);
         Future<?> compressionTask = activeCompressionTask;
@@ -218,8 +230,48 @@ public final class SendCompressed extends Plugin {
             transcoderCallbackThread = null;
             transcoderCallbackHandler = null;
         }
+        unregisterCancelReceiver(context);
+        ProgressReporter.cancel(context);
         patcher.unpatchAll();
         commands.unregisterAll();
+    }
+
+    private void registerCancelReceiver(Context context) {
+        Context appContext = context.getApplicationContext() == null ? context : context.getApplicationContext();
+        cancelReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent != null && ACTION_CANCEL.equals(intent.getAction())) {
+                    cancelActiveWork(context);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(ACTION_CANCEL);
+        if (Build.VERSION.SDK_INT >= 33) {
+            appContext.registerReceiver(cancelReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            appContext.registerReceiver(cancelReceiver, filter);
+        }
+    }
+
+    private void unregisterCancelReceiver(Context context) {
+        BroadcastReceiver receiver = cancelReceiver;
+        if (receiver == null) return;
+        cancelReceiver = null;
+        try {
+            Context appContext = context.getApplicationContext() == null ? context : context.getApplicationContext();
+            appContext.unregisterReceiver(receiver);
+        } catch (Throwable ignored) {}
+    }
+
+    private void cancelActiveWork(Context context) {
+        cancelRequested = true;
+        Future<Void> transcodeTask = activeTranscodeTask;
+        if (transcodeTask != null) transcodeTask.cancel(true);
+        Future<?> compressionTask = activeCompressionTask;
+        if (compressionTask != null) compressionTask.cancel(true);
+        dismissActiveAttachmentSheet();
+        ProgressReporter.cancel(context);
     }
 
     private boolean hasCompressibleAttachment(Context context, List<? extends Attachment<?>> attachments) {
@@ -232,7 +284,7 @@ public final class SendCompressed extends Plugin {
         return false;
     }
 
-    private void compressAndReplay(ChatInputViewModel viewModel, Object[] args) {
+    private void compressAndReplay(ChatInputViewModel viewModel, Object[] args, SendDestination destination) {
         Context context = (Context) args[0];
         List<? extends Attachment<?>> attachments = (List<? extends Attachment<?>>) args[3];
         Function1<Boolean, Unit> callback = (Function1<Boolean, Unit>) args[5];
@@ -244,6 +296,11 @@ public final class SendCompressed extends Plugin {
             }
             ProgressReporter progress = new ProgressReporter(context, attachments.size());
             List<Attachment<?>> compressed = compressAttachments(context, attachments, progress);
+            if (cancelRequested || Thread.currentThread().isInterrupted()) {
+                mainHandler.post(() -> callback.invoke(Boolean.FALSE));
+                progress.cancel();
+                return;
+            }
             args[3] = compressed;
             args[4] = true;
             progress.message("SendCompressed: sending compressed attachments...");
@@ -255,7 +312,11 @@ public final class SendCompressed extends Plugin {
                     return;
                 }
                 try {
-                    XposedBridge.invokeOriginalMethod(sendMessageMethod, viewModel, args);
+                    if (shouldSendDirectly(viewModel, destination)) {
+                        sendToCapturedChannel(args, destination);
+                    } else {
+                        XposedBridge.invokeOriginalMethod(sendMessageMethod, viewModel, args);
+                    }
                     progress.finish("SendCompressed: sending compressed attachments...");
                 } catch (Throwable throwable) {
                     logger.error("Failed to send compressed attachments", throwable);
@@ -276,6 +337,89 @@ public final class SendCompressed extends Plugin {
                 }
             });
         }
+    }
+
+    private SendDestination captureDestination(ChatInputViewModel viewModel) {
+        try {
+            Object viewState = viewModel.getViewState();
+            if (!(viewState instanceof ChatInputViewModel.ViewState.Loaded)) return SendDestination.unavailable();
+            ChatInputViewModel.ViewState.Loaded loaded = (ChatInputViewModel.ViewState.Loaded) viewState;
+            return new SendDestination(
+                loaded.getChannelId(),
+                loaded.getMaxFileSizeMB(),
+                loaded.isEditing(),
+                loaded.getSelectedThreadDraft() != null
+            );
+        } catch (Throwable throwable) {
+            logger.error("Failed to capture original send destination", throwable);
+            return SendDestination.unavailable();
+        }
+    }
+
+    private void sendToCapturedChannel(Object[] args, SendDestination destination) {
+        Context context = (Context) args[0];
+        MessageManager messageManager = (MessageManager) args[1];
+        MessageContent messageContent = (MessageContent) args[2];
+        List<? extends Attachment<?>> attachments = (List<? extends Attachment<?>>) args[3];
+        Function1<Boolean, Unit> callback = (Function1<Boolean, Unit>) args[5];
+        final boolean[] validationHandled = {false};
+
+        MessageManager.AttachmentsRequest attachmentsRequest = new MessageManager.AttachmentsRequest(
+            currentFileSizeMb(context, attachments),
+            destination.maxFileSizeMB,
+            attachments
+        );
+        Function2<Integer, Integer, Unit> onMessageTooLong = (currentLength, maxLength) -> {
+            validationHandled[0] = true;
+            callback.invoke(Boolean.FALSE);
+            return Unit.a;
+        };
+        Function2<Integer, Boolean, Unit> onFilesTooLarge = (maxFileSizeMb, isPremium) -> {
+            validationHandled[0] = true;
+            callback.invoke(Boolean.FALSE);
+            return Unit.a;
+        };
+
+        boolean accepted = MessageManager.sendMessage$default(
+            messageManager,
+            messageContent.getTextContent(),
+            messageContent.getMentionedUsers(),
+            attachmentsRequest,
+            Long.valueOf(destination.channelId),
+            null,
+            false,
+            onMessageTooLong,
+            onFilesTooLarge,
+            null,
+            16 | 32 | 256,
+            null
+        );
+        if (!validationHandled[0]) callback.invoke(Boolean.valueOf(accepted));
+    }
+
+    private boolean shouldSendDirectly(ChatInputViewModel viewModel, SendDestination destination) {
+        if (!destination.canSendDirectly()) return false;
+        try {
+            Object viewState = viewModel.getViewState();
+            if (!(viewState instanceof ChatInputViewModel.ViewState.Loaded)) return true;
+            ChatInputViewModel.ViewState.Loaded loaded = (ChatInputViewModel.ViewState.Loaded) viewState;
+            return loaded.getChannelId() != destination.channelId
+                || loaded.isEditing()
+                || loaded.getSelectedThreadDraft() != null;
+        } catch (Throwable throwable) {
+            logger.error("Failed to compare current send destination", throwable);
+            return true;
+        }
+    }
+
+    private float currentFileSizeMb(Context context, List<? extends Attachment<?>> attachments) {
+        long bytes = 0L;
+        for (Attachment<?> attachment : attachments) {
+            long size = originalSize(context, attachment);
+            if (size <= 0L || size == Long.MAX_VALUE) continue;
+            bytes += size;
+        }
+        return bytes / (1024f * 1024f);
     }
 
     private void releaseInputUi(Function1<Boolean, Unit> callback) {
@@ -313,6 +457,7 @@ public final class SendCompressed extends Plugin {
 
         int index = 0;
         for (Attachment<?> attachment : attachments) {
+            if (cancelRequested || Thread.currentThread().isInterrupted()) throw new CancellationException("SendCompressed canceled");
             index++;
             Attachment<?> replacement = attachment;
             try {
@@ -392,6 +537,7 @@ public final class SendCompressed extends Plugin {
     }
 
     private Attachment<?> compressVideo(Context context, Attachment<?> attachment, long targetBytes, ProgressReporter progressReporter) throws Exception {
+        if (cancelRequested || Thread.currentThread().isInterrupted()) throw new CancellationException("SendCompressed canceled");
         long originalSize = originalSize(context, attachment);
         File outFile = newTempFile(context, attachment.getDisplayName(), ".mp4");
         VideoPreset preset = videoPreset(context, attachment, originalSize, targetBytes);
@@ -429,6 +575,7 @@ public final class SendCompressed extends Plugin {
             return attachment;
         } catch (CancellationException canceled) {
             if (!outFile.delete()) outFile.deleteOnExit();
+            if (cancelRequested || Thread.currentThread().isInterrupted()) throw canceled;
             return attachment;
         } catch (Throwable throwable) {
             logger.error("Video compression failed for " + attachment.getDisplayName() + "; sending original.", throwable);
@@ -507,7 +654,17 @@ public final class SendCompressed extends Plugin {
                 .setOnlyAlertOnce(true)
                 .setShowWhen(false)
                 .setProgress(max, progress, indeterminate);
+            if (!autoCancel) {
+                builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelIntent(context));
+            }
             notificationManager.notify(NOTIFICATION_ID, builder.build());
+        }
+
+        private PendingIntent cancelIntent(Context context) {
+            Intent intent = new Intent(ACTION_CANCEL).setPackage(context.getPackageName());
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
+            return PendingIntent.getBroadcast(context, 0, intent, flags);
         }
 
         static void cancel(Context context) {
@@ -683,6 +840,28 @@ public final class SendCompressed extends Plugin {
             this.frameRate = frameRate;
             this.videoBitrate = videoBitrate;
             this.audioBitrate = audioBitrate;
+        }
+    }
+
+    private static final class SendDestination {
+        final long channelId;
+        final int maxFileSizeMB;
+        final boolean editing;
+        final boolean threadDraft;
+
+        SendDestination(long channelId, int maxFileSizeMB, boolean editing, boolean threadDraft) {
+            this.channelId = channelId;
+            this.maxFileSizeMB = maxFileSizeMB;
+            this.editing = editing;
+            this.threadDraft = threadDraft;
+        }
+
+        boolean canSendDirectly() {
+            return channelId > 0L && maxFileSizeMB > 0 && !editing && !threadDraft;
+        }
+
+        static SendDestination unavailable() {
+            return new SendDestination(0L, 0, true, true);
         }
     }
 
