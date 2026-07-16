@@ -4,6 +4,8 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
+import androidx.fragment.app.FragmentActivity;
+import androidx.fragment.app.FragmentManager;
 import com.aliucord.Utils;
 import com.aliucord.annotations.AliucordPlugin;
 import com.aliucord.api.SettingsAPI;
@@ -108,33 +110,68 @@ public final class Text2File extends Plugin {
         Object[] replayArguments,
         String text
     ) {
-        AtomicBoolean accepted = new AtomicBoolean(false);
+        AtomicBoolean resolved = new AtomicBoolean(false);
         Function1<View, Unit> convert = view -> {
-            accepted.set(true);
-            convertAndSend(context, viewModel, sendMessage, replayArguments, text);
+            if (resolved.compareAndSet(false, true)) {
+                convertAndSend(context.getApplicationContext(), viewModel, sendMessage, replayArguments, text);
+            }
             return Unit.a;
         };
         Function1<Boolean, Unit> validationCallback = (Function1<Boolean, Unit>) replayArguments[5];
 
-        WidgetNoticeDialog.show(
-            Utils.getAppActivity().getSupportFragmentManager(),
-            "Message is too long",
-            "Convert the message to a text file and send it as an attachment?",
-            "Convert and send",
-            "Cancel",
-            Collections.singletonMap(Utils.getResId("notice_ok", "id"), convert),
-            null,
-            null,
-            null,
-            null,
-            true,
-            null,
-            0,
-            () -> {
-                if (!accepted.get()) validationCallback.invoke(Boolean.FALSE);
-                return Unit.a;
+        Utils.mainThread.post(() -> {
+            if (stopped || resolved.get()) {
+                rejectSend(validationCallback, resolved);
+                return;
             }
-        );
+
+            try {
+                FragmentActivity appActivity = Utils.getAppActivity();
+                FragmentActivity activity = appActivity != null
+                    ? appActivity
+                    : context instanceof FragmentActivity ? (FragmentActivity) context : null;
+                if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+                    logger.errorToast("Could not show Text2File prompt");
+                    rejectSend(validationCallback, resolved);
+                    return;
+                }
+
+                FragmentManager fragmentManager = activity.getSupportFragmentManager();
+                if (fragmentManager.isStateSaved()) {
+                    logger.errorToast("Could not show Text2File prompt");
+                    rejectSend(validationCallback, resolved);
+                    return;
+                }
+
+                WidgetNoticeDialog.show(
+                    fragmentManager,
+                    "Message is too long",
+                    "Convert the message to a text file and send it as an attachment?",
+                    "Convert and send",
+                    "Cancel",
+                    Collections.singletonMap(WidgetNoticeDialog.OK_BUTTON, convert),
+                    null,
+                    null,
+                    null,
+                    null,
+                    true,
+                    null,
+                    0,
+                    () -> {
+                        rejectSend(validationCallback, resolved);
+                        return Unit.a;
+                    }
+                );
+            } catch (Throwable throwable) {
+                logger.errorToast("Could not show Text2File prompt");
+                logger.error("Failed to show conversion dialog", throwable);
+                rejectSend(validationCallback, resolved);
+            }
+        });
+    }
+
+    private static void rejectSend(Function1<Boolean, Unit> validationCallback, AtomicBoolean resolved) {
+        if (resolved.compareAndSet(false, true)) validationCallback.invoke(Boolean.FALSE);
     }
 
     private void convertAndSend(
